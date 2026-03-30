@@ -44,8 +44,6 @@ URLS_TO_OPEN = [
     "https://docs.google.com",
 ]
 
-# AppleScript will close tabs whose URL contains any of these strings
-URL_PATTERNS_TO_CLOSE = ["claude.ai", "classroom.google.com", "docs.google.com"]
 
 MUSIC_QUERY = "AC/DC Back in Black"
 MUSIC_TMP   = "/tmp/tonystark_music"
@@ -80,29 +78,32 @@ def open_in_chrome(url: str) -> None:
     webbrowser.open(url)
 
 
-def close_chrome_tabs() -> None:
-    """Close any Chrome tabs whose URL matches our patterns (macOS AppleScript)."""
+def get_open_chrome_urls() -> list[str]:
+    """Return a list of all URLs currently open in Chrome tabs (macOS)."""
     if sys.platform != "darwin":
-        return
-    patterns_as = " or ".join(
-        f'(URL of t) contains "{p}"' for p in URL_PATTERNS_TO_CLOSE
-    )
-    script = f"""
+        return []
+    script = """
     tell application "Google Chrome"
+        set urlList to {}
         repeat with w in (every window)
-            set toClose to {{}}
             repeat with t in (every tab of w)
-                if {patterns_as} then
-                    set end of toClose to t
-                end if
-            end repeat
-            repeat with t in toClose
-                close t
+                set end of urlList to (URL of t)
             end repeat
         end repeat
+        return urlList
     end tell
     """
-    subprocess.run(["osascript", "-e", script], capture_output=True)
+    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    if result.returncode != 0:
+        return []
+    # osascript returns comma-separated values
+    return [u.strip() for u in result.stdout.strip().split(",") if u.strip()]
+
+
+def is_tab_open(target_url: str, open_urls: list[str]) -> bool:
+    """Check if a tab with exactly this URL (ignoring trailing slash) is already open."""
+    target = target_url.rstrip("/")
+    return any(u.rstrip("/") == target for u in open_urls)
 
 
 # ---------------------------------------------------------------------------
@@ -172,10 +173,14 @@ def activate() -> None:
     subprocess.Popen(["say", "-r", "180", "WELCOME KEREM"],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # Open all tabs
+    # Open tabs only if not already open
+    open_urls = get_open_chrome_urls()
     for url in URLS_TO_OPEN:
-        open_in_chrome(url)
-        time.sleep(0.3)
+        if is_tab_open(url, open_urls):
+            print(f"  Already open, skipping: {url}")
+        else:
+            open_in_chrome(url)
+            time.sleep(0.3)
 
     # Play music (blocking download if needed — daemon=False keeps process alive)
     play_music()
@@ -184,11 +189,8 @@ def activate() -> None:
 def deactivate() -> None:
     global app_state
     app_state = "idle"
-    print("\n*** SHUTTING DOWN TONY STARK MODE ***\n")
+    print("\n*** STOPPING MUSIC ***\n")
     stop_music()
-    close_chrome_tabs()
-    subprocess.Popen(["say", "-r", "180", "Goodbye Kerem"],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def handle_trigger() -> None:
