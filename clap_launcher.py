@@ -26,7 +26,9 @@ import sounddevice as sd
 SAMPLE_RATE = 44100
 BLOCK_SIZE = 1024
 
-CLAP_RATIO = 6.0          # clap must be this many × louder than background noise
+CLAP_RATIO = 12.0         # clap must be this many × louder than background noise
+CLAP_MIN_AMP = 0.03       # absolute minimum amplitude — filters out mouse clicks
+CLAP_HF_RATIO = 0.35      # fraction of energy that must be above 1 kHz (claps are broadband)
 CLAPS_REQUIRED = 2
 CLAP_WINDOW = 1.5         # seconds — window to count claps in
 INTER_CLAP_SILENCE = 0.15 # seconds — debounce gap between clap counts
@@ -151,12 +153,25 @@ def audio_callback(indata: np.ndarray, frames: int, time_info, status) -> None:
 
     ratio = amplitude / max(background_level, 1e-6)
 
+    # Spectral check: claps have broad high-frequency energy; mouse clicks do not
+    frame = indata[:, 0]
+    fft_mag = np.abs(np.fft.rfft(frame)) ** 2
+    freqs = np.fft.rfftfreq(len(frame), 1.0 / SAMPLE_RATE)
+    total_energy = fft_mag.sum()
+    hf_ratio = float(fft_mag[freqs >= 1000].sum() / max(total_energy, 1e-10))
+
     with _lock:
-        if ratio >= CLAP_RATIO and (now - last_clap_time) >= INTER_CLAP_SILENCE:
+        is_clap = (
+            amplitude >= CLAP_MIN_AMP
+            and ratio >= CLAP_RATIO
+            and hf_ratio >= CLAP_HF_RATIO
+            and (now - last_clap_time) >= INTER_CLAP_SILENCE
+        )
+        if is_clap:
             last_clap_time = now
             clap_times.append(now)
             clap_times = [t for t in clap_times if now - t <= CLAP_WINDOW]
-            print(f"  Clap! (x{len(clap_times)})  amp={amplitude:.4f}  ratio={ratio:.1f}x")
+            print(f"  Clap! (x{len(clap_times)})  amp={amplitude:.4f}  ratio={ratio:.1f}x  hf={hf_ratio:.2f}")
 
             if (len(clap_times) >= CLAPS_REQUIRED
                     and (now - last_trigger_time) >= TRIGGER_COOLDOWN):
@@ -168,8 +183,12 @@ def audio_callback(indata: np.ndarray, frames: int, time_info, status) -> None:
 
 def calibrate_callback(indata: np.ndarray, frames: int, time_info, status) -> None:
     amplitude = float(np.sqrt(np.mean(indata ** 2)))
+    frame = indata[:, 0]
+    fft_mag = np.abs(np.fft.rfft(frame)) ** 2
+    freqs = np.fft.rfftfreq(len(frame), 1.0 / SAMPLE_RATE)
+    hf_ratio = float(fft_mag[freqs >= 1000].sum() / max(fft_mag.sum(), 1e-10))
     bar = "#" * int(amplitude * 400)
-    print(f"\r  amp={amplitude:.5f}  |{bar:<40}|  ", end="", flush=True)
+    print(f"\r  amp={amplitude:.5f}  hf={hf_ratio:.2f}  |{bar:<40}|  ", end="", flush=True)
 
 
 # ---------------------------------------------------------------------------
