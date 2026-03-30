@@ -35,7 +35,7 @@ INTER_CLAP_SILENCE = 0.15 # seconds — debounce gap between clap counts
 TRIGGER_COOLDOWN = 3.0    # seconds — min gap between full triggers
 
 CLAUDE_CODE_URL = "https://claude.ai/code"
-MUSIC_QUERY = "AC/DC Shoot to Thrill Iron Man"
+MUSIC_QUERY = "AC/DC Back in Black"
 MUSIC_TMP = "/tmp/tonystark_music"  # yt-dlp appends the right extension
 
 # --- State ---
