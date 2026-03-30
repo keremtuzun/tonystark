@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 Hand Clap Gesture Launcher - Tony Stark Mode
-Clap twice to open Claude Code in Chrome and play Tony Stark music!
+
+First double clap  → say "WELCOME KEREM", open all apps, play music
+Second double clap → stop music, close tabs, go back to listening
 
 Usage:
   python3 clap_launcher.py             # normal mode
@@ -12,6 +14,7 @@ Requirements:
 """
 
 import glob
+import os
 import shutil
 import subprocess
 import sys
@@ -26,29 +29,40 @@ import sounddevice as sd
 SAMPLE_RATE = 44100
 BLOCK_SIZE = 1024
 
-CLAP_RATIO = 12.0         # clap must be this many × louder than background noise
-CLAP_MIN_AMP = 0.03       # absolute minimum amplitude — filters out mouse clicks
-CLAP_HF_RATIO = 0.35      # fraction of energy that must be above 1 kHz (claps are broadband)
+CLAP_RATIO     = 12.0   # clap must be this many × louder than background noise
+CLAP_MIN_AMP   = 0.03   # absolute minimum amplitude — filters out mouse clicks
+CLAP_HF_RATIO  = 0.35   # fraction of energy above 1 kHz (claps are broadband)
 CLAPS_REQUIRED = 2
-CLAP_WINDOW = 1.5         # seconds — window to count claps in
-INTER_CLAP_SILENCE = 0.15 # seconds — debounce gap between clap counts
-TRIGGER_COOLDOWN = 3.0    # seconds — min gap between full triggers
+CLAP_WINDOW    = 1.5    # seconds — window to count claps in
+INTER_CLAP_SILENCE = 0.15  # seconds — debounce gap between clap counts
+TRIGGER_COOLDOWN   = 3.0   # seconds — min gap between full triggers
 
-CLAUDE_CODE_URL = "https://claude.ai/code"
+URLS_TO_OPEN = [
+    "https://claude.ai/code",
+    "https://claude.ai",
+    "https://classroom.google.com",
+    "https://docs.google.com",
+]
+
+# AppleScript will close tabs whose URL contains any of these strings
+URL_PATTERNS_TO_CLOSE = ["claude.ai", "classroom.google.com", "docs.google.com"]
+
 MUSIC_QUERY = "AC/DC Back in Black"
-MUSIC_TMP = "/tmp/tonystark_music"  # yt-dlp appends the right extension
+MUSIC_TMP   = "/tmp/tonystark_music"
 
 # --- State ---
 clap_times: list[float] = []
 last_trigger_time: float = 0.0
-last_clap_time: float = 0.0
-background_level: float = 0.001
+last_clap_time: float    = 0.0
+background_level: float  = 0.001
 _lock = threading.Lock()
-_stop_event = threading.Event()
+
+# Toggle state: "idle" → activate on clap; "active" → deactivate on clap
+app_state = "idle"
 
 
 # ---------------------------------------------------------------------------
-# Actions
+# Chrome helpers
 # ---------------------------------------------------------------------------
 
 def open_in_chrome(url: str) -> None:
@@ -66,10 +80,41 @@ def open_in_chrome(url: str) -> None:
     webbrowser.open(url)
 
 
-def play_music() -> None:
-    """Download Tony Stark music via yt-dlp then play with afplay / mpv."""
+def close_chrome_tabs() -> None:
+    """Close any Chrome tabs whose URL matches our patterns (macOS AppleScript)."""
+    if sys.platform != "darwin":
+        return
+    patterns_as = " or ".join(
+        f'(URL of t) contains "{p}"' for p in URL_PATTERNS_TO_CLOSE
+    )
+    script = f"""
+    tell application "Google Chrome"
+        repeat with w in (every window)
+            set toClose to {{}}
+            repeat with t in (every tab of w)
+                if {patterns_as} then
+                    set end of toClose to t
+                end if
+            end repeat
+            repeat with t in toClose
+                close t
+            end repeat
+        end repeat
+    end tell
+    """
+    subprocess.run(["osascript", "-e", script], capture_output=True)
 
-    # --- mpv (if installed via brew) ---
+
+# ---------------------------------------------------------------------------
+# Music
+# ---------------------------------------------------------------------------
+
+def stop_music() -> None:
+    subprocess.run(["pkill", "afplay"], capture_output=True)
+    subprocess.run(["pkill", "mpv"],    capture_output=True)
+
+
+def play_music() -> None:
     if shutil.which("mpv"):
         print("  Playing via mpv...")
         subprocess.Popen(
@@ -79,16 +124,13 @@ def play_music() -> None:
         )
         return
 
-    # --- yt-dlp download → afplay (Mac built-in, no brew needed) ---
     if sys.platform == "darwin":
-        # Clean up any leftover temp files first
         for old in glob.glob(MUSIC_TMP + ".*"):
             try:
-                import os; os.remove(old)
+                os.remove(old)
             except OSError:
                 pass
-
-        print("  Downloading music via yt-dlp (takes a few seconds)...")
+        print("  Downloading music via yt-dlp...")
         try:
             ret = subprocess.run(
                 [sys.executable, "-m", "yt_dlp",
@@ -101,11 +143,11 @@ def play_music() -> None:
             if ret.returncode == 0:
                 files = glob.glob(MUSIC_TMP + ".*")
                 if files:
-                    print(f"  Playing via afplay...")
+                    print("  Playing via afplay...")
                     subprocess.Popen(
                         ["afplay", files[0]],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        start_new_session=True,  # keeps playing after this script exits
+                        start_new_session=True,
                     )
                     return
         except subprocess.TimeoutExpired:
@@ -113,24 +155,49 @@ def play_music() -> None:
         except Exception as e:
             print(f"  yt-dlp error: {e}")
 
-    # --- Final fallback: open YouTube in Chrome ---
     query = MUSIC_QUERY.replace(" ", "+")
     open_in_chrome(f"https://www.youtube.com/results?search_query={query}")
-    print("  Opened YouTube in Chrome (install yt-dlp for auto-play: pip install yt-dlp)")
 
 
-def activate_tony_stark_mode() -> None:
-    """Called in a non-daemon thread — keeps process alive until music starts."""
+# ---------------------------------------------------------------------------
+# Activate / Deactivate
+# ---------------------------------------------------------------------------
+
+def activate() -> None:
+    global app_state
+    app_state = "active"
     print("\n*** TONY STARK MODE ACTIVATED ***\n")
-    _stop_event.set()
 
-    # Immediate audio feedback so user knows the clap registered
-    subprocess.run(["osascript", "-e", "beep"], capture_output=True)
+    # Voice greeting
+    subprocess.Popen(["say", "-r", "180", "WELCOME KEREM"],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    open_in_chrome(CLAUDE_CODE_URL)
-    time.sleep(0.5)
+    # Open all tabs
+    for url in URLS_TO_OPEN:
+        open_in_chrome(url)
+        time.sleep(0.3)
+
+    # Play music (blocking download if needed — daemon=False keeps process alive)
     play_music()
-    # Script exits here → LaunchAgent will restart it automatically
+
+
+def deactivate() -> None:
+    global app_state
+    app_state = "idle"
+    print("\n*** SHUTTING DOWN TONY STARK MODE ***\n")
+    stop_music()
+    close_chrome_tabs()
+    subprocess.Popen(["say", "-r", "180", "Goodbye Kerem"],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def handle_trigger() -> None:
+    """Called in a non-daemon thread on each confirmed double clap."""
+    global app_state
+    if app_state == "idle":
+        activate()
+    else:
+        deactivate()
 
 
 # ---------------------------------------------------------------------------
@@ -140,8 +207,6 @@ def activate_tony_stark_mode() -> None:
 def audio_callback(indata: np.ndarray, frames: int, time_info, status) -> None:
     global clap_times, last_trigger_time, last_clap_time, background_level
 
-    if _stop_event.is_set():
-        return
     if status:
         print(f"[audio] {status}", file=sys.stderr)
 
@@ -153,17 +218,16 @@ def audio_callback(indata: np.ndarray, frames: int, time_info, status) -> None:
 
     ratio = amplitude / max(background_level, 1e-6)
 
-    # Spectral check: claps have broad high-frequency energy; mouse clicks do not
     frame = indata[:, 0]
     fft_mag = np.abs(np.fft.rfft(frame)) ** 2
-    freqs = np.fft.rfftfreq(len(frame), 1.0 / SAMPLE_RATE)
-    total_energy = fft_mag.sum()
-    hf_ratio = float(fft_mag[freqs >= 1000].sum() / max(total_energy, 1e-10))
+    freqs   = np.fft.rfftfreq(len(frame), 1.0 / SAMPLE_RATE)
+    total   = fft_mag.sum()
+    hf_ratio = float(fft_mag[freqs >= 1000].sum() / max(total, 1e-10))
 
     with _lock:
         is_clap = (
             amplitude >= CLAP_MIN_AMP
-            and ratio >= CLAP_RATIO
+            and ratio  >= CLAP_RATIO
             and hf_ratio >= CLAP_HF_RATIO
             and (now - last_clap_time) >= INTER_CLAP_SILENCE
         )
@@ -177,15 +241,14 @@ def audio_callback(indata: np.ndarray, frames: int, time_info, status) -> None:
                     and (now - last_trigger_time) >= TRIGGER_COOLDOWN):
                 last_trigger_time = now
                 clap_times.clear()
-                # daemon=False so process stays alive until music download finishes
-                threading.Thread(target=activate_tony_stark_mode, daemon=False).start()
+                threading.Thread(target=handle_trigger, daemon=False).start()
 
 
 def calibrate_callback(indata: np.ndarray, frames: int, time_info, status) -> None:
     amplitude = float(np.sqrt(np.mean(indata ** 2)))
-    frame = indata[:, 0]
-    fft_mag = np.abs(np.fft.rfft(frame)) ** 2
-    freqs = np.fft.rfftfreq(len(frame), 1.0 / SAMPLE_RATE)
+    frame    = indata[:, 0]
+    fft_mag  = np.abs(np.fft.rfft(frame)) ** 2
+    freqs    = np.fft.rfftfreq(len(frame), 1.0 / SAMPLE_RATE)
     hf_ratio = float(fft_mag[freqs >= 1000].sum() / max(fft_mag.sum(), 1e-10))
     bar = "#" * int(amplitude * 400)
     print(f"\r  amp={amplitude:.5f}  hf={hf_ratio:.2f}  |{bar:<40}|  ", end="", flush=True)
@@ -198,8 +261,7 @@ def calibrate_callback(indata: np.ndarray, frames: int, time_info, status) -> No
 def main() -> None:
     if "--calibrate" in sys.argv:
         print("=== CALIBRATION MODE ===")
-        print("Watch the bar — clap and note the peak amplitude.")
-        print("If claps are missed, lower CLAP_RATIO. If too sensitive, raise it.")
+        print("Clap and note amp + hf values. Mouse clicks should show low amp.")
         print("Press Ctrl+C to quit.\n")
         try:
             with sd.InputStream(samplerate=SAMPLE_RATE, blocksize=BLOCK_SIZE,
@@ -211,23 +273,24 @@ def main() -> None:
             print("\nDone.")
         return
 
-    print("╔══════════════════════════════════════════════╗")
-    print("║   Hand Clap Gesture Launcher — Tony Stark   ║")
-    print("╠══════════════════════════════════════════════╣")
-    print("║  Clap TWICE to:                              ║")
-    print("║    • Open Claude Code in Chrome              ║")
-    print("║    • Play Tony Stark music                   ║")
-    print("║  --calibrate  to tune sensitivity            ║")
-    print("╚══════════════════════════════════════════════╝\n")
+    print("╔══════════════════════════════════════════════════════╗")
+    print("║       Hand Clap Gesture Launcher — Tony Stark       ║")
+    print("╠══════════════════════════════════════════════════════╣")
+    print("║  Clap TWICE to activate:                            ║")
+    print("║    • Says  \"WELCOME KEREM\"                          ║")
+    print("║    • Opens Claude Code, Claude, Classroom, Docs     ║")
+    print("║    • Plays AC/DC Back in Black                      ║")
+    print("║  Clap TWICE again to close everything               ║")
+    print("║  --calibrate  to tune sensitivity                   ║")
+    print("╚══════════════════════════════════════════════════════╝\n")
 
     try:
         with sd.InputStream(samplerate=SAMPLE_RATE, blocksize=BLOCK_SIZE,
                             channels=1, dtype="float32",
                             callback=audio_callback):
             print(f"Listening... (ratio={CLAP_RATIO}x, {CLAPS_REQUIRED} claps in {CLAP_WINDOW}s)\n")
-            while not _stop_event.is_set():
+            while True:
                 time.sleep(0.1)
-        print("Listener stopped.")
     except KeyboardInterrupt:
         print("\nGoodbye, Mr. Stark.")
     except sd.PortAudioError as e:
