@@ -67,22 +67,45 @@ def open_in_chrome(url: str) -> None:
     webbrowser.open(url)
 
 
+def get_audio_url_via_yt_dlp(query: str) -> str | None:
+    """Use yt-dlp (pip-installed) to resolve a YouTube search to a direct audio URL."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "yt_dlp", "-f", "bestaudio",
+             "-g", "--no-playlist", f"ytsearch1:{query}"],
+            capture_output=True, text=True, timeout=20,
+        )
+        url = result.stdout.strip().splitlines()[0] if result.returncode == 0 else None
+        return url or None
+    except Exception:
+        return None
+
+
 def play_music() -> None:
-    """Play the Tony Stark music. Uses mpv if available, otherwise opens Chrome."""
+    """Play Tony Stark music. Priority: mpv > yt-dlp+afplay (Mac) > Chrome fallback."""
     if shutil.which("mpv"):
-        # mpv can stream YouTube audio directly via yt-dlp
         print("  Playing via mpv...")
         subprocess.Popen(
             ["mpv", f"ytdl://ytsearch1:{MUSIC_QUERY}", "--no-video"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-    else:
-        # Fallback: open YouTube search in Chrome
-        query = MUSIC_QUERY.replace(" ", "+")
-        url = f"https://www.youtube.com/results?search_query={query}"
-        open_in_chrome(url)
-        print("  Music opened in Chrome (install mpv for automatic playback)")
+        return
+
+    # Mac built-in: resolve audio URL via yt-dlp (pip) then stream with afplay
+    if sys.platform == "darwin" and shutil.which("afplay"):
+        print("  Resolving audio stream via yt-dlp...")
+        audio_url = get_audio_url_via_yt_dlp(MUSIC_QUERY)
+        if audio_url:
+            print("  Playing via afplay...")
+            subprocess.Popen(["afplay", audio_url],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+
+    # Final fallback: open YouTube search in Chrome
+    query = MUSIC_QUERY.replace(" ", "+")
+    url = f"https://www.youtube.com/results?search_query={query}"
+    open_in_chrome(url)
+    print("  Music opened in Chrome (install mpv or run: pip install yt-dlp)")
 
 
 def activate_tony_stark_mode() -> None:
@@ -150,7 +173,13 @@ def main() -> None:
         return
 
     has_mpv = shutil.which("mpv") is not None
-    music_note = "mpv (auto-play)" if has_mpv else "Chrome (install mpv for auto-play)"
+    has_afplay = sys.platform == "darwin" and shutil.which("afplay") is not None
+    if has_mpv:
+        music_note = "mpv (auto-play)"
+    elif has_afplay:
+        music_note = "afplay via yt-dlp (auto-play) — run: pip install yt-dlp"
+    else:
+        music_note = "Chrome fallback — install mpv for auto-play"
 
     print("╔══════════════════════════════════════════════╗")
     print("║   Hand Clap Gesture Launcher — Tony Stark   ║")
