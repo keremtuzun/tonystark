@@ -48,11 +48,19 @@ _stop_event = threading.Event()   # set this to stop listening
 
 
 def open_in_chrome(url: str) -> None:
+    # macOS
+    if sys.platform == "darwin":
+        try:
+            subprocess.Popen(["open", "-a", "Google Chrome", url],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except FileNotFoundError:
+            pass
+    # Linux
     for browser in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
         try:
             subprocess.Popen([browser, "--new-tab", url],
-                             stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return
         except FileNotFoundError:
             continue
@@ -70,16 +78,10 @@ def play_music() -> None:
             stderr=subprocess.DEVNULL,
         )
     else:
-        # Fallback: open YouTube search in Chrome and press Enter on first result
-        # Build a direct-play URL using YouTube's autoplay search feature
+        # Fallback: open YouTube search in Chrome
         query = MUSIC_QUERY.replace(" ", "+")
         url = f"https://www.youtube.com/results?search_query={query}"
         open_in_chrome(url)
-        # Give Chrome time to load, then send Enter to start the first video
-        time.sleep(3)
-        if shutil.which("xdotool"):
-            subprocess.run(["xdotool", "key", "Tab", "Tab", "Return"],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         print("  Music opened in Chrome (install mpv for automatic playback)")
 
 
